@@ -1,1 +1,0 @@
-scoreboard objectives add OneItemLimit dummy

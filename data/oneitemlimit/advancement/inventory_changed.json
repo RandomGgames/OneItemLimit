@@ -1,0 +1,10 @@
+{
+    "criteria": {
+        "changed": {
+            "trigger": "minecraft:inventory_changed"
+        }
+    },
+    "rewards": {
+        "function": "oneitemlimit:inventory_changed"
+    }
+}

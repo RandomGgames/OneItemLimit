@@ -1,0 +1,14 @@
+{
+    "condition": "minecraft:entity_properties",
+    "entity": "this",
+    "predicate": {
+        "slots": {
+            "inventory.*": {
+                "items": "minecraft:spruce_planks",
+                "count": {
+                    "min": 2
+                }
+            }
+        }
+    }
+}
