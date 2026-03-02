@@ -1,313 +1,365 @@
+"""
+mcfunction_debug_message_generator
+
+Automatically scans all .mcfunction files in the current working directory and its subdirectories,
+and ensures that each file has a standardized debug header at the top. The header includes:
+1. A comment line "# Debug Message"
+2. A tellraw command that broadcasts the namespace and function path to players with the DebugMessages tag
+3. A blank line separating the header from the rest of the file
+
+If the header is missing, it will be added. If the header exists but is outdated, it will be updated.
+All other content in the file is left unchanged. Files that already have the correct header remain unmodified.
+
+Usage:
+- Configure the script using the Config dataclass if needed
+- Run the script in the directory containing your Minecraft datapacks
+- The script will log each file processed, indicating whether the header was added, updated, or unchanged
+"""
+
+import json
 import logging
-import os
-import pathlib
 import re
+import send2trash
 import socket
 import sys
-import time
-import toml
-import traceback
-import typing
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
+from typing import Iterator, Iterable
 
 logger = logging.getLogger(__name__)
 
-"""
-Python Script Template
-
-Template includes:
-- Configurable logging via config file
-- Script run time at the end of execution
-- Error handling and cleanup
-"""
-
-__version__ = "1.0.1"  # Major.Minor.Patch
+__version__ = "2.0.0"  # Major.Minor.Patch
 
 
-def read_toml(file_path: typing.Union[str, pathlib.Path]) -> dict:
+@dataclass
+class ScriptConfig:
+    file_extension = r"\.mcfunction$"
+    excluded_files = [
+        "tick.mcfunction",
+        "load.mcfunction",
+    ]
+
+
+@dataclass
+class LoggingConfig:
+    mode: str = "per_run"  # single_file | per_run | per_day
+    # SN: str = field(default_factory=lambda: input("Please input the SN: "))
+    logs_folder_name: str = "logs"
+    console_logging_level: str = "DEBUG"
+    file_logging_level: str = "DEBUG"
+    log_message_format: str = "%(asctime)s.%(msecs)03d %(levelname)s [%(funcName)s] - %(message)s"
+    max_files: int | None = 10
+
+    def __post_init__(self):
+        if hasattr(self, "SN"):
+            sn = (self.SN or "").strip().replace(" ", "_").upper()
+            sn = re.sub(r'[<>:"/\\|?*]', "", sn)
+            self.SN = sn if sn else "Undefined"
+
+    @property
+    def log_file_path(self) -> Path:
+        """Generate log path based on mode and optional SN folder."""
+        # Base folder
+        base_folder = Path(self.logs_folder_name)
+        if hasattr(self, "SN") and getattr(self, "SN", None) not in ("", None):
+            log_folder = base_folder / self.SN
+        else:
+            log_folder = base_folder
+        log_folder.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pc_name = socket.gethostname()
+        if hasattr(self, "SN") and getattr(self, "SN", None) not in ("", None):
+            script_name = Path(__file__).stem + "_" + self.SN
+        else:
+            script_name = Path(__file__).stem
+
+        # Filename depends on mode
+        if self.mode == "single_file":
+            log_file_name = f"{script_name}__{pc_name}.log"
+        elif self.mode == "per_day":
+            day_stamp = datetime.now().strftime("%Y%m%d")
+            log_file_name = f"{day_stamp}__{script_name}__{pc_name}.log"
+        else:  # per_run
+            log_file_name = f"{timestamp}__{script_name}__{pc_name}.log"
+
+        return log_folder / log_file_name
+
+
+@dataclass
+class ExitBehaviorConfig:
+    pause_on_error: bool = True
+    always_pause: bool = False
+
+
+@dataclass
+class Config:
+    script: ScriptConfig = field(default_factory=ScriptConfig)
+    generate_config_if_missing: bool = False
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    exit_behavior: ExitBehaviorConfig = field(default_factory=ExitBehaviorConfig)
+
+
+def iter_files_regex(
+    pattern: str,
+    exclude_names: Iterable[str] | None = None,
+) -> Iterator[Path]:
     """
-    Read configuration settings from the TOML file.
+    Recursively yield files in the current working directory whose
+    *filename* matches the given regex pattern, excluding any exact
+    filenames listed in exclude_names.
+
+    Args:
+        pattern: Regex pattern applied to the file name (not full path).
+        exclude_names: Iterable of exact filenames to exclude.
+
+    Yields:
+        Path objects, one at a time.
     """
-    file_path = pathlib.Path(file_path)
+    compiled = re.compile(pattern, re.IGNORECASE)
+    excluded = {name.lower() for name in exclude_names or []}
+
+    for path in Path.cwd().rglob("*"):
+        if not path.is_file():
+            continue
+
+        name = path.name
+        if name.lower() in excluded:
+            continue
+
+        if compiled.search(name):
+            yield path
+
+
+def update_debug_header(file_path: Path) -> None:
+    """
+    Ensure the .mcfunction file has the correct debug header.
+    Directly logs whether the header was added, updated, or unchanged.
+    """
+
+    original_text = file_path.read_text(encoding="utf-8")
+    lines = original_text.splitlines()
+
+    # --- Extract namespace (folder after "data")
+    parts = file_path.parts
+    try:
+        data_index = parts.index("data")
+        namespace = parts[data_index + 1]
+    except (ValueError, IndexError):
+        logger.warning(f"Cannot determine namespace from: {file_path}")
+        return
+
+    # --- Extract function path (after "function")
+    try:
+        func_index = parts.index("function")
+        relative_parts = parts[func_index + 1:]
+    except ValueError:
+        logger.warning(f"Cannot determine function path from: {file_path}")
+        return
+
+    relative_parts = list(relative_parts)
+    relative_parts[-1] = Path(relative_parts[-1]).stem
+    function_path = "/".join(relative_parts)
+
+    expected_tellraw = (
+        f'tellraw @a[tag=DebugMessages] '
+        f'[{{"text":"{namespace}:{function_path}","color":"gray"}}]'
+    )
+
+    expected_header = [
+        "# Debug Message",
+        expected_tellraw,
+        "",
+    ]
+
+    # --- Detect existing header
+    has_header = len(lines) >= 1 and lines[0].startswith("# Debug Message")
+
+    if has_header:
+        current_header = lines[:3]
+        if current_header == expected_header:
+            logger.debug(f"[UNCHANGED] {file_path}")
+            return
+
+        # Something differs → update
+        changes = []
+        if len(lines) >= 2 and lines[1] != expected_tellraw:
+            changes.append(f'tellraw changed from "{lines[1]}" to "{expected_tellraw}"')
+
+        new_content = "\n".join(expected_header + lines[3:]) + "\n"
+        file_path.write_text(new_content, encoding="utf-8")
+        logger.info(f"[UPDATED] {file_path}")
+
+    else:
+        # No header → add
+        new_content = "\n".join(expected_header + lines) + "\n"
+        file_path.write_text(new_content, encoding="utf-8")
+        logger.info(f"[ADDED] {file_path}")
+
+
+def main(Config: Config):
+    for f in iter_files_regex(pattern=Config.script.file_extension, exclude_names=Config.script.excluded_files):
+        update_debug_header(f)
+
+
+def save_default_config(file_path: Path, config: Config):
+    """Save JSON config based on dataclass defaults."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with file_path.open("w", encoding="utf-8") as f:
+        json.dump(asdict(config), f, indent=4)
+
+
+def load_config(file_path: Path, generate_if_missing: bool = True) -> Config:
+    """
+    Load configuration from JSON file.
+    If missing and generate_if_missing=True, auto-generate.
+    If missing and generate_if_missing=False, use dataclass defaults.
+    Any missing keys in existing JSON are filled from dataclass defaults.
+    """
+    def merge_defaults(dataclass_type, data: dict):
+        """Fill missing keys from dataclass defaults."""
+        defaults = asdict(dataclass_type())
+        merged = {**defaults, **data}  # Python 3.9+ can also use defaults | data
+        return dataclass_type(**merged)
+
     if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    config = toml.load(file_path)
+        config = Config()
+        if generate_if_missing:
+            save_default_config(file_path, config)
+        return config
+
+    with file_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Merge defaults for each section
+    logging_cfg = merge_defaults(LoggingConfig, data.get("logging", {}))
+    exit_cfg = merge_defaults(ExitBehaviorConfig, data.get("exit_behavior", {}))
+
+    # ScriptConfig is currently empty; merge if fields are added later
+    script_cfg = ScriptConfig()
+
+    config = Config(
+        logging=logging_cfg,
+        exit_behavior=exit_cfg,
+        script=script_cfg,
+        generate_config_if_missing=data.get("generate_config_if_missing", True)
+    )
+
+    # Optionally overwrite JSON with missing keys filled in
+    if generate_if_missing:
+        save_default_config(file_path, config)
+
     return config
 
 
-def read_text_file_lines(file_path: typing.Union[str, pathlib.Path]) -> typing.List[str]:
+def enforce_max_log_count(dir_path: Path | str, max_count: int | None, script_name: str):
     """
-    Reads a text file and returns a list of strings with the \n characters at the end of each line removed.
-    Includes error checking and logging.
+    Keep only the N most recent logs for this script.
+
+    Oldest files are deleted first, based on modification time.
 
     Args:
-    file_path (typing.Union[str, pathlib.Path]): The file path of the text file to read.
-
-    Returns:
-    typing.List[str]: A list of strings with the \n characters at the end of each line removed.
+        dir_path (Path | str): Directory containing log files.
+        max_count (int | None): Maximum number of log files to keep. None = no limit.
+        script_name (str): Filter logs by this script name.
     """
-    try:
-        with open(file_path, 'r') as f:
-            lines = [line.strip() for line in f]
-        logger.info(f"Successfully read {file_path}")
-        return lines
-    except Exception as e:
-        logger.error(f"Error reading {file_path}: {e}")
-        return []
-
-
-def write_text_file_lines(file_path: typing.Union[str, pathlib.Path], lines: typing.List[str]) -> None:
-    """
-    Writes a list of strings to a text file, with each string on a new line.
-    Includes error checking and logging.
-
-    Args:
-    file_path (typing.Union[str, pathlib.Path]): The file path of the text file to write.
-    lines (typing.List[str]): A list of strings to write to the text file.
-
-    Returns:
-    None
-    """
-    try:
-        with open(file_path, 'w') as f:
-            for line in lines:
-                f.write(line + '\n')
-        logger.info(f"Successfully wrote {file_path}")
-    except Exception as e:
-        logger.error(f"Error writing {file_path}: {e}")
-
-
-def iter_matching_files(root_path, regex_patterns):
-    """
-    Generator that yields file paths under root_path
-    matching any regex in regex_patterns.
-
-    Parameters:
-        root_path (str): Base directory to search.
-        regex_patterns (list[str]): List of regex strings.
-        logger (logging.Logger, optional): Logger instance.
-
-    Yields:
-        str: Full path to each matching file.
-    """
-    compiled = [re.compile(p) for p in regex_patterns]
-
-    logger.info("Starting search in: %s", root_path)
-    logger.debug("Patterns: %s", regex_patterns)
-
-    for dirpath, _, filenames in os.walk(root_path):
-        logger.debug("Scanning directory: %s", dirpath)
-        for filename in filenames:
-            full_path = os.path.join(dirpath, filename)
-            normalized = full_path.replace("\\", "/")
-            if any(r.search(normalized) for r in compiled):
-                logger.debug("Matched file: %s", normalized)
-                yield full_path
-
-    logger.info("Finished iterating in: %s", root_path)
-
-
-def generate_mcfunction_debug_line(mcfunction_path: typing.Union[str, pathlib.Path]) -> str:
-    """
-    Generates a tellraw line for a Minecraft function file showing its pack and relative path.
-    Automatically extracts the pack name from the path.
-
-    Args:
-        mcfunction_path: Full path to the mcfunction file.
-
-    Returns:
-        str: A tellraw command that prints the function identifier in gray text.
-    """
-    mcfunction_path = pathlib.Path(mcfunction_path).resolve()
-    parts = mcfunction_path.parts
-
-    # Find "data/<namespace>/function/"
-    try:
-        data_index = parts.index("data")
-        namespace = parts[data_index + 1]  # This is the "map" part
-        if parts[data_index + 2] != "function":
-            raise ValueError(f"Expected 'function' after namespace in {mcfunction_path}")
-        relative_parts = parts[data_index + 3:]  # Everything after 'data/<namespace>/function/'
-        relative_path = "/".join(relative_parts).removesuffix(".mcfunction")
-    except ValueError as e:
-        raise ValueError(f"Could not determine function relative path for {mcfunction_path}: {e}")
-
-    return f'tellraw @a[tag=DebugMessages] [{{"text":"{namespace}:{relative_path}","color":"gray"}}]'
-
-
-def add_or_update_debug_message(mcfunction_path: pathlib.Path) -> None:
-    """
-    Ensures the mcfunction file starts with a debug message header.
-
-    - Adds a comment line "# Debug Message" if missing.
-    - Adds or updates the tellraw line immediately after the comment.
-
-    Args:
-        mcfunction_path: Full path to the mcfunction file.
-
-    Returns:
-        None
-    """
-    mcfunction_path = mcfunction_path.resolve()
-
-    # Read existing lines
-    lines = read_text_file_lines(mcfunction_path)
-
-    try:
-        tellraw_line = generate_mcfunction_debug_line(mcfunction_path)
-    except ValueError as e:
-        logger.error(f"Could not generate tellraw line for {mcfunction_path}: {e}")
+    if max_count is None or max_count <= 0:
         return
 
-    # Case 1: File empty or first line is not the debug comment
-    if not lines or not lines[0].startswith("# Debug Message"):
-        new_lines = ["# Debug Message", tellraw_line] + lines
-        write_text_file_lines(mcfunction_path, new_lines)
-        logger.info(f"Added debug header to {mcfunction_path}")
-        return
+    dir_path = Path(dir_path)
+    # Get all matching log files
+    files = [f for f in dir_path.glob(f"*{script_name}*.log") if f.is_file()]
 
-    # Case 2: First line is debug comment, check the second line
-    if len(lines) < 2 or lines[1] != tellraw_line:
-        lines[1:2] = [tellraw_line]  # Replace or insert the tellraw line
-        write_text_file_lines(mcfunction_path, lines)
-        logger.info(f"Updated debug tellraw line in {mcfunction_path}")
-        return
+    # Sort by modification time (oldest first)
+    files.sort(key=lambda f: f.stat().st_mtime)
 
-    # Case 3: Header already correct, do nothing
-    logger.debug(f"{mcfunction_path} debug header already correct. Skipping.")
-
-
-def main() -> None:
-    for mcfunction_path in iter_matching_files(".", [r".*\/(?!tick|load)\w+\.mcfunction$"]):
-        mcfunction_path = pathlib.Path(mcfunction_path).resolve()
-        logger.debug(f"Processing {mcfunction_path}")
-        add_or_update_debug_message(mcfunction_path)
+    # Delete excess files
+    if len(files) > max_count:
+        to_delete = files[:len(files) - max_count]  # oldest files
+        for f in to_delete:
+            try:
+                send2trash.send2trash(f)
+                logger.debug(f"Deleted old log: {f.name}")
+            except OSError as e:
+                logger.error(f"Failed to delete {f.name}: {e}")
 
 
-def format_duration_long(duration_seconds: float) -> str:
-    """
-    Format duration in a human-friendly way, showing only the two largest non-zero units.
-    For durations >= 1s, do not show microseconds or nanoseconds.
-    For durations >= 1m, do not show milliseconds.
-    """
-    ns = int(duration_seconds * 1_000_000_000)
-    units = [
-        ('y', 365 * 24 * 60 * 60 * 1_000_000_000),
-        ('mo', 30 * 24 * 60 * 60 * 1_000_000_000),
-        ('d', 24 * 60 * 60 * 1_000_000_000),
-        ('h', 60 * 60 * 1_000_000_000),
-        ('m', 60 * 1_000_000_000),
-        ('s', 1_000_000_000),
-        ('ms', 1_000_000),
-        ('us', 1_000),
-        ('ns', 1),
-    ]
-    parts = []
-    for name, factor in units:
-        value, ns = divmod(ns, factor)
-        if value:
-            parts.append(f"{value}{name}")
-        # Stop after two largest non-zero units
-        if len(parts) == 2:
-            break
-    if not parts:
-        return "0s"
-    return "".join(parts)
+def setup_logging(logger_obj: logging.Logger, config: LoggingConfig) -> Path:
+    """Set up file and console logging based on AppConfig."""
+    log_path = config.log_file_path
 
+    logger_obj.handlers.clear()
+    logger_obj.setLevel(getattr(logging, config.file_logging_level.upper(), logging.INFO))
 
-def setup_logging(
-        logger: logging.Logger,
-        log_file_path: typing.Union[str, pathlib.Path],
-        number_of_logs_to_keep: typing.Union[int, None] = None,
-        console_logging_level: int = logging.DEBUG,
-        file_logging_level: int = logging.DEBUG,
-        log_message_format: str = "%(asctime)s.%(msecs)03d %(levelname)s [%(funcName)s] [%(name)s]: %(message)s",
-        date_format: str = "%Y-%m-%d %H:%M:%S") -> None:
-    log_file_path = pathlib.Path(log_file_path)
-    log_dir = log_file_path.parent
-    log_dir.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter(
+        config.log_message_format,
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
 
-    # Limit # of logs in logs folder
-    if number_of_logs_to_keep is not None:
-        log_files = sorted([f for f in log_dir.glob("*.log")], key=lambda f: f.stat().st_mtime)
-        if len(log_files) > number_of_logs_to_keep:
-            for file in log_files[:-number_of_logs_to_keep]:
-                file.unlink()
+    if config.mode == "per_day":
+        # Automatic midnight rotation
+        file_handler = TimedRotatingFileHandler(
+            log_path,
+            when="midnight",
+            interval=1,
+            backupCount=config.max_files if config.max_files else 0,
+            encoding="utf-8",
+        )
+    else:
+        # per_run or single_file
+        file_mode = "w" if config.mode == "per_run" else "a"
+        file_handler = logging.FileHandler(
+            log_path,
+            mode=file_mode,
+            encoding="utf-8",
+        )
 
-    # Clear old handlers to avoid duplication
-    logger.handlers.clear()
-    logger.setLevel(file_logging_level)
-
-    formatter = logging.Formatter(log_message_format, datefmt=date_format)
-
-    # File Handler
-    file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
-    file_handler.setLevel(file_logging_level)
+    file_handler.setLevel(getattr(logging, config.file_logging_level.upper(), logging.INFO))
     file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    logger_obj.addHandler(file_handler)
 
-    # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(console_logging_level)
+    console_handler.setLevel(getattr(logging, config.console_logging_level.upper(), logging.INFO))
     console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    logger_obj.addHandler(console_handler)
+
+    return log_path
+
+
+def bootstrap():
+    exit_code = 0
+    try:
+        script_path = Path(__file__)
+        config_path = script_path.with_name(f"{script_path.stem}_config.json")
+        config = load_config(config_path, generate_if_missing=Config.generate_config_if_missing)
+
+        setup_logging(logger, config.logging)  # just pass the logging config
+
+        logger.info(f"Script: {script_path.stem}")
+        logger.info(f"Version: {__version__}")
+        logger.info(f"Host: {socket.gethostname()}")
+        logger.info(f"AppConfig: {config}")
+
+        main(config)
+
+    except KeyboardInterrupt:
+        logger.warning("Operation interrupted by user.")
+        exit_code = 130
+    except Exception as e:
+        logger.exception(f"A fatal error has occurred: {e}")
+        exit_code = 1
+    finally:
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
+
+    if config.exit_behavior.always_pause or (config.exit_behavior.pause_on_error and exit_code != 0):
+        input("Press Enter to exit...")
+
+    return exit_code
 
 
 if __name__ == "__main__":
-    config_path = pathlib.Path("config.toml")
-    if not config_path.exists():
-        raise FileNotFoundError(f"Missing {config_path}")
-    global config
-    config = read_toml(config_path)
-
-    console_logging_level = getattr(logging, config.get("logging", {}).get("console_logging_level", "INFO").upper(), logging.DEBUG)
-    file_logging_level = getattr(logging, config.get("logging", {}).get("file_logging_level", "INFO").upper(), logging.DEBUG)
-    logs_file_path = config.get("logging", {}).get("logs_file_path", "logs")
-    use_logs_folder = config.get("logging", {}).get("use_logs_folder", True)
-    number_of_logs_to_keep = config.get("logging", {}).get("number_of_logs_to_keep", 10)
-    log_message_format = config.get("logging", {}).get(
-        "log_message_format",
-        "%(asctime)s.%(msecs)03d %(levelname)s [%(funcName)s]: %(message)s"
-    )
-
-    script_name = pathlib.Path(__file__).stem
-    pc_name = socket.gethostname()
-    if use_logs_folder:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        log_dir = pathlib.Path(f"{logs_file_path}/{script_name}")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file_name = f"{timestamp}_{script_name}_{pc_name}.log"
-        log_file_path = log_dir / log_file_name
-    else:
-        log_file_path = pathlib.Path(f"{script_name}_{pc_name}.log")
-
-    setup_logging(
-        logger,
-        log_file_path,
-        console_logging_level=console_logging_level,
-        file_logging_level=file_logging_level,
-        number_of_logs_to_keep=number_of_logs_to_keep,
-        log_message_format=log_message_format
-    )
-
-    error = 0
-    try:
-        start_time = time.perf_counter_ns()
-        logger.info(f"Script: {script_name} | Version: {__version__} | Host: {pc_name}")
-
-        main()
-        end_time = time.perf_counter_ns()
-        duration = end_time - start_time
-        duration = format_duration_long(duration / 1e9)
-        logger.info(f"Execution completed in {duration}.")
-    except KeyboardInterrupt:
-        logger.warning("Operation interrupted by user.")
-        error = 130
-    except Exception as e:
-        logger.warning(f"A fatal error has occurred: {repr(e)}\n{traceback.format_exc()}")
-        error = 1
-    finally:
-        for handler in logger.handlers:
-            handler.close()
-        logger.handlers.clear()
-        sys.exit(error)
+    sys.exit(bootstrap())

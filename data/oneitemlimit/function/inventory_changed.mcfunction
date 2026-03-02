@@ -1,5 +1,7 @@
 # Debug Message
 tellraw @a[tag=DebugMessages] [{"text":"oneitemlimit:inventory_changed","color":"gray"}]
 
-tellraw @s {"text":"Your inventory changed!"}
-advancement revoke @s only oneitemlimit:inventory_changed
+schedule clear oneitemlimit:reset_inventory_changed_advancement
+schedule function oneitemlimit:reset_inventory_changed_advancement 1 append
+
+execute as @s run function oneitemlimit:items/spruce_planks
