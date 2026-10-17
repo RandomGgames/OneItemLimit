@@ -1,6 +1,20 @@
 {
-	"pack": {
-		"pack_format": 71,
-		"description": "Keeps stack sizes at 1. Can have multiple of the same item in different slots\nCreated by RandomGgames."
-	}
+    "pack": {
+        "min_format": 121,
+        "max_format": 121,
+        "description": [
+            {
+                "text": "OneItemLimit",
+                "color": "yellow"
+            },
+            {
+                "text": "\nCreated By: ",
+                "color": "gold"
+            },
+            {
+                "text": "RandomGgames",
+                "color": "#00ff00"
+            }
+        ]
+    }
 }
