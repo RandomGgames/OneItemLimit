@@ -6,24 +6,107 @@
 {How to use the script}
 """
 
-import logging
-import sys
 from datetime import datetime
 from pathlib import Path
+import logging
+import re
+import sys
 
-# try:
-#     import some_third_party_module
-# except ModuleNotFoundError as e:
-#     print(f"[ERROR] Missing dependency: {e}")
-#     input("\nPress Enter to exit...")
+try:
+    from text_file_utils import read_text_file, write_text_file
+except ModuleNotFoundError as e:
+    print(f"[ERROR] Missing dependency: {e}")
+    input("\nPress Enter to exit...")
 
 __version__ = "0.0.0"
 
 logger = logging.getLogger(__name__)
 
 
+def generate_tick_function(ids: list[str], grouping: int, output_file: str | Path) -> None:
+    """Generate tick.mcfunction with item functions distributed across timer ticks."""
+    if grouping < 1:
+        raise ValueError("grouping must be at least 1")
+
+    lines = ["scoreboard players add .Timer OneItemLimit 1", ""]
+
+    for index, item_id in enumerate(ids):
+        timer_value = index // grouping + 1
+        lines.append(f"execute if score .Timer OneItemLimit matches {timer_value} as @a run function oneitemlimit:clear/{item_id}")
+
+    max_timer = (len(ids) + grouping - 1) // grouping
+
+    if max_timer:
+        lines.extend(["", f"execute if score .Timer OneItemLimit matches {max_timer} run scoreboard players set .Timer OneItemLimit 0"])
+
+    write_text_file(output_file, "\n".join(lines) + "\n")
+    logger.info(f"Generated tick function with {len(ids)} items across {max_timer} timer ticks: {output_file}")
+
+
+def generate_item_function(item_id: str, output_folder: str | Path) -> None:
+    """Generate the function that clears all but one of the specified item."""
+    output_folder = Path(output_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    content = [
+        f"execute store result score @s OneItemLimit run clear @s minecraft:{item_id} 0",
+        "scoreboard players operation @s OneItemLimit -= #Remaining OneItemLimit",
+        "execute if score @s OneItemLimit matches 1.. store result storage oneitemlimit:macro count int 1 run scoreboard players get @s OneItemLimit",
+        f'execute if score @s OneItemLimit matches 1.. run data modify storage oneitemlimit:macro item set value "minecraft:{item_id}"',
+        "execute if score @s OneItemLimit matches 1.. run function oneitemlimit:clear_excess with storage oneitemlimit:macro",
+    ]
+
+    output_file = output_folder / f"{item_id}.mcfunction"
+    write_text_file(output_file, "\n".join(content) + "\n")
+    logger.debug(f"Generated item function: {output_file}")
+
+
+def generate_item_functions(ids: list[str], output_folder: str | Path, remove_all_non_defined_ids: bool = False) -> None:
+    """Generate all item functions and optionally remove obsolete item functions."""
+    output_folder = Path(output_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    if remove_all_non_defined_ids:
+        defined_ids = set(ids)
+
+        for file_path in output_folder.glob("*.mcfunction"):
+            if file_path.stem not in defined_ids:
+                file_path.unlink()
+                logger.info(f"Removed obsolete item function: {file_path}")
+
+    for item_id in ids:
+        generate_item_function(item_id, output_folder)
+
+    logger.info(f"Generated {len(ids)} item functions in {output_folder}")
+
+
 def main() -> None:
-    logger.info("Code goes here")
+    ids_file = Path("ids.txt")
+    grouping = 10  # Number of item types processed per timer tick
+    remove_all_non_defined_ids = True  # Remove .mcfunction files not listed in ids.txt
+
+    function_folder = Path("data/oneitemlimit/function")
+    clear_folder = function_folder / "clear"
+    tick_file = function_folder / "tick.mcfunction"
+
+    ids = read_text_file(ids_file, as_list=True)
+    ids = [item_id.strip() for item_id in ids if item_id.strip()]
+
+    if not ids:
+        raise ValueError(f"No item IDs found in {ids_file}; refusing to generate empty functions")
+
+    invalid_ids = [item_id for item_id in ids if not re.fullmatch(r"[a-z0-9._-]+", item_id)]
+    if invalid_ids:
+        raise ValueError(f"Invalid item IDs found in {ids_file}: {invalid_ids}")
+
+    if len(ids) != len(set(ids)):
+        logger.warning("Duplicate item IDs found; removing duplicates while preserving order")
+        ids = list(dict.fromkeys(ids))
+
+    logger.info(f"Generating datapack functions for {len(ids)} item IDs with grouping={grouping}")
+
+    generate_tick_function(ids, grouping, tick_file)
+    generate_item_functions(ids, clear_folder, remove_all_non_defined_ids)
 
 
 def setup_logging(log_folder: Path = Path("Logs"), console_level: int = logging.DEBUG, enable_file_logging: bool = True, max_log_files: int | None = 30, file_level: int = logging.DEBUG, date_format: str = "%Y-%m-%dT%H:%M:%S", message_format: str = "%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s") -> Path | None:
