@@ -1,0 +1,3 @@
+[submodule "text_file_utils"]
+	path = text_file_utils
+	url = https://github.com/RandomGgames/text_file_utils
