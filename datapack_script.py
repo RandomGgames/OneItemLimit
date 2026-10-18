@@ -13,6 +13,8 @@ import re
 import sys
 
 try:
+    from dir_utils import extract_file_from_zip
+    from json_file_utils import read_json_bytes
     from text_file_utils import read_text_file, write_text_file
 except ModuleNotFoundError as e:
     print(f"[ERROR] Missing dependency: {e}")
@@ -81,9 +83,36 @@ def generate_item_functions(ids: list[str], output_folder: str | Path, remove_al
 
 
 def main() -> None:
-    ids_file = Path("ids.txt")
-    grouping = 50  # Number of item types processed per timer tick
+    jar_path = Path(r"26.3-0.19.5.jar")
+    ids_file = Path(r"ids.txt")
+    grouping = 93  # Number of item types processed per timer tick
     remove_all_non_defined_ids = True  # Remove .mcfunction files not listed in ids.txt
+
+    json_bytes = extract_file_from_zip(jar_path, "assets/minecraft/lang/en_us.json")
+    data = read_json_bytes(json_bytes)
+    if not isinstance(data, dict):
+        raise TypeError("Data should be a dict")
+
+    item_ids = []
+    for key, value in data.items():
+        # logger.debug("%s: %s", key, repr(value))
+
+        if not isinstance(key, str):
+            continue
+
+        match = re.match(
+            r"^(?:item|block)\.minecraft\.([a-z0-9_]+)$",
+            key,
+        )
+        if not match:
+            continue
+
+        item_id = match.group(1)
+        logger.debug("Found: %s", item_id)
+        item_ids.append(item_id)
+
+    item_ids.sort()
+    write_text_file(ids_file, item_ids)
 
     function_folder = Path("data/oneitemlimit/function")
     clear_folder = function_folder / "clear"

@@ -1,3 +1,9 @@
 [submodule "text_file_utils"]
 	path = text_file_utils
 	url = https://github.com/RandomGgames/text_file_utils
+[submodule "dir_utils"]
+	path = dir_utils
+	url = https://github.com/RandomGgames/dir_utils
+[submodule "json_file_utils"]
+	path = json_file_utils
+	url = https://github.com/RandomGgames/json_file_utils
