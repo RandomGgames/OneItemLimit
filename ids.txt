@@ -166,7 +166,6 @@ breeze_rod
 breeze_spawn_egg
 brewer_pottery_sherd
 brewing_stand
-brewing_stand
 brick
 brick_slab
 brick_stairs
@@ -222,7 +221,6 @@ carrot_on_a_stick
 cartography_table
 carved_pumpkin
 cat_spawn_egg
-cauldron
 cauldron
 cave_spider_spawn_egg
 chain_command_block
@@ -564,7 +562,6 @@ flow_armor_trim_smithing_template
 flow_banner_pattern
 flow_pottery_sherd
 flower_banner_pattern
-flower_pot
 flower_pot
 flowering_azalea
 flowering_azalea_leaves
@@ -937,7 +934,6 @@ nether_quartz_ore
 nether_sprouts
 nether_star
 nether_wart
-nether_wart
 nether_wart_block
 netherite_axe
 netherite_block
@@ -1083,7 +1079,6 @@ pink_wool
 pink_wool_slab
 pink_wool_stairs
 piston
-pitcher_plant
 pitcher_plant
 pitcher_pod
 plains_village_map
@@ -1264,7 +1259,6 @@ resin_brick_stairs
 resin_brick_wall
 resin_bricks
 resin_clump
-resin_clump
 respawn_anchor
 rib_armor_trim_smithing_template
 rooted_dirt
@@ -1390,7 +1384,6 @@ stone_spear
 stone_stairs
 stone_sword
 stonecutter
-straw_bed
 straw_bed
 stray_spawn_egg
 strider_spawn_egg
@@ -1593,7 +1586,6 @@ weathered_cut_copper_stairs
 weathered_lightning_rod
 weeping_vines
 wet_sponge
-wheat
 wheat
 wheat_seeds
 white_banner
