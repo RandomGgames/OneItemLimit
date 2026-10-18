@@ -20,8 +20,6 @@ except ModuleNotFoundError as e:
     print(f"[ERROR] Missing dependency: {e}")
     input("\nPress Enter to exit...")
 
-__version__ = "0.0.0"
-
 logger = logging.getLogger(__name__)
 
 
